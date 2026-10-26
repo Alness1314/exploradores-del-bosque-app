@@ -1588,6 +1588,22 @@ export function createForestScene(canvas: HTMLCanvasElement, cb: ForestCallbacks
     )
       .then((u) => updaters.push(u))
       .catch((e) => console.warn('Los lobos no cargaron.', e));
+
+    // Zorros: mismo modelo animado, más pequeño, de pelaje rojizo y más ágil; viven en otra zona del bosque.
+    const foxHome = home(26, 30);
+    const foxHomes = [foxHome, home(foxHome.x + 3, foxHome.z - 4), home(foxHome.x - 5, foxHome.z + 2)];
+    buildWolves(
+      scene,
+      `${import.meta.env.BASE_URL}models/animals/wolf.glb`,
+      root,
+      foxHomes,
+      (x, z) => walkable(x, z, 0.5),
+      player,
+      (meshes) => meshes.forEach((m) => shadows.addShadowCaster(m)),
+      { prefix: 'fox', length: 0.85, tint: '#d9772b', speed: 1.35, seed: 733 },
+    )
+      .then((u) => updaters.push(u))
+      .catch((e) => console.warn('Los zorros no cargaron.', e));
   });
 
   // --- Marcado de hallazgos ------------------------------------------------

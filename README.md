@@ -34,7 +34,7 @@ npm run qr -- https://tu-sitio.example/   # genera docs/qr.png y docs/qr.svg
 - **Pasto con viento**: ~18 000 matas (7 000 en pantallas táctiles y visores) con instanciación por hardware y movimiento calculado en el shader; se repite en una cuadrícula
   de 80 m que sigue al visitante, así que cubre todo el mundo, y se aparta cuando pasas.
 - **Animales con movimiento**: mariposas; aves que giran sobre el bosque; conejos y **liebres** (más grandes, de orejas largas y saltos amplios) que descansan, saltan y huyen si te acercas;
-  **dos manadas de venados** (un macho con astas, hembras y una cría) que pastan, caminan, se ponen alerta y huyen al galope; y una **manada de tres lobos** (modelo animado CC0 con esqueleto)
+  **dos manadas de venados** (un macho con astas, hembras y una cría) que pastan, caminan, se ponen alerta y huyen al galope; y una **manada de tres lobos** y **tres zorros** (mismo modelo animado CC0 con esqueleto, el zorro más pequeño y rojizo; todos rodean los árboles al huir)
   que recorre su zona y se aparta del visitante.
 - **Realidad virtual (Meta Quest 3)**: botón "Entrar en VR" cuando el navegador soporta WebXR inmersivo. Ver abajo.
 - **Código QR**: botón "QR" (también en la bienvenida) para generar el QR de la dirección de la demo y descargarlo como PNG. El dominio se cambia con `VITE_PUBLIC_URL` (ver "Dominio del QR").

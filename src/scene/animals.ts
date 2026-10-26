@@ -556,11 +556,12 @@ export function buildDeer(
 
       d.speed += (want - d.speed) * Math.min(1, dt * 4);
       if (d.speed > 0.02) {
-        const nx = d.pos.x + Math.sin(d.heading) * d.speed * dt;
-        const nz = d.pos.z + Math.cos(d.heading) * d.speed * dt;
-        if (canWalk(nx, nz)) {
-          d.pos.x = nx;
-          d.pos.z = nz;
+        const st = steer(d, d.pos.x, d.pos.z, d.heading, d.speed * dt, canWalk);
+        if (st) {
+          d.pos.x = st.x;
+          d.pos.z = st.z;
+          // Gira hacia el rumbo con el que rodea el obstáculo.
+          d.heading = turnTo(d.heading, st.heading, 0.5);
         } else {
           d.speed = 0;
           if (d.state === 'walk') d.state = 'graze';
@@ -591,6 +592,30 @@ export function buildDeer(
   };
 }
 
+/** Lado preferido para rodear obstáculos de cada animal, para que no cambie de lado en cada cuadro. */
+const sides = new WeakMap<object, number>();
+
+/**
+ * Da un paso hacia `heading`; si hay un árbol o tronco delante, lo rodea probando rumbos cada vez más desviados hacia su lado
+ * preferido. Devuelve `null` solo si no hay salida (rodeado).
+ */
+function steer(key: object, x: number, z: number, heading: number, dist: number, canWalk: (x: number, z: number) => boolean) {
+  let side = sides.get(key);
+  if (!side) {
+    side = Math.random() < 0.5 ? -1 : 1;
+    sides.set(key, side);
+  }
+  for (let k = 0; k <= 7; k++) {
+    for (const sg of k === 0 ? [1] : [side, -side]) {
+      const h = heading + sg * k * 0.4;
+      const nx = x + Math.sin(h) * dist;
+      const nz = z + Math.cos(h) * dist;
+      if (canWalk(nx, nz)) return { x: nx, z: nz, heading: h };
+    }
+  }
+  return null;
+}
+
 function turnTo(current: number, want: number, rate: number): number {
   const diff = Math.atan2(Math.sin(want - current), Math.cos(want - current));
   return current + diff * Math.min(1, rate);
@@ -604,6 +629,18 @@ function turnTo(current: number, want: number, rate: number): number {
  * Manada de lobos de "Animal Pack Vol.2" (Quaternius, CC0), con esqueleto y las animaciones Idle y Walking del propio modelo.
  * Descansan, recorren su zona y se alejan del visitante si este se acerca demasiado.
  */
+export interface PackOptions {
+  /** Prefijo de los nombres de nodos y materiales. */
+  prefix: string;
+  /** Largo del cuerpo en metros. */
+  length: number;
+  /** Color fijo del pelaje (por ejemplo, el zorro); sin valor se usa el del modelo. */
+  tint?: string;
+  /** Multiplicador de velocidad. */
+  speed: number;
+  seed: number;
+}
+
 export async function buildWolves(
   scene: Scene,
   url: string,
@@ -612,7 +649,9 @@ export async function buildWolves(
   canWalk: (x: number, z: number) => boolean,
   player: () => Vector3,
   onMeshes?: (meshes: Mesh[]) => void,
+  options: Partial<PackOptions> = {},
 ): Promise<Updater> {
+  const o: PackOptions = { prefix: 'wolf', length: 1.5, tint: undefined, speed: 1, seed: 404, ...options };
   const container = await LoadAssetContainerAsync(url, scene);
 
   interface Wolf {
@@ -632,8 +671,8 @@ export async function buildWolves(
 
   let scale = 0;
   const wolves: Wolf[] = homes.map((home, i) => {
-    const entries = container.instantiateModelsToScene((n) => `wolf${i}_${n}`, false, { doNotInstantiate: true });
-    const holder = new TransformNode(`wolf${i}`, scene);
+    const entries = container.instantiateModelsToScene((n) => `${o.prefix}${i}_${n}`, false, { doNotInstantiate: true });
+    const holder = new TransformNode(`${o.prefix}${i}`, scene);
     holder.parent = parent;
     entries.rootNodes.forEach((n) => ((n as TransformNode).parent = holder));
     const meshes = holder.getChildMeshes(false).filter((m) => m.getTotalVertices() > 0) as Mesh[];
@@ -641,8 +680,8 @@ export async function buildWolves(
     // Material liso con el color del modelo: el PBR sin entorno se ve apagado en esta escena.
     meshes.forEach((m) => {
       const pbr = m.material as PBRMaterial | null;
-      const std = new StandardMaterial(`wolfMat${i}`, scene);
-      std.diffuseColor = pbr?.albedoColor?.clone() ?? new Color3(0.8, 0.8, 0.78);
+      const std = new StandardMaterial(`${o.prefix}Mat${i}`, scene);
+      std.diffuseColor = o.tint ? Color3.FromHexString(o.tint) : (pbr?.albedoColor?.clone() ?? new Color3(0.8, 0.8, 0.78));
       // Cada lobo tiene un tono un poco distinto para distinguir la manada.
       std.diffuseColor.scaleInPlace(i === 0 ? 1 : 0.62 + (i % 3) * 0.12);
       std.emissiveColor = std.diffuseColor.scale(0.3);
@@ -661,7 +700,7 @@ export async function buildWolves(
     };
     if (!scale) {
       const b = measure();
-      scale = (1.5 * (i === 0 ? 1.1 : 1)) / Math.max(b.max.x - b.min.x, b.max.z - b.min.z);
+      scale = (o.length * (i === 0 ? 1.1 : 1)) / Math.max(b.max.x - b.min.x, b.max.z - b.min.z);
     }
     holder.scaling.setAll(scale * (i === 0 ? 1.1 : 1));
     const b = measure();
@@ -669,7 +708,7 @@ export async function buildWolves(
     const find = (word: string): AnimationGroup | undefined => entries.animationGroups.find((g) => g.name.toLowerCase().includes(word));
     entries.animationGroups.forEach((g) => g.stop());
 
-    const r = rng(404 + i * 37);
+    const r = rng(o.seed + i * 37);
     const w: Wolf = {
       holder,
       idle: find('idle'),
@@ -738,7 +777,7 @@ export async function buildWolves(
         }
       } else {
         const fleeing = w.state === 'avoid';
-        play(w, w.walk, fleeing ? 1.7 : 1);
+        play(w, w.walk, (fleeing ? 1.7 : 1) * o.speed);
         const dx = w.target.x - w.pos.x;
         const dz = w.target.z - w.pos.z;
         if (Math.hypot(dx, dz) < 0.4 || (fleeing && dPlayer > 15)) {
@@ -746,12 +785,11 @@ export async function buildWolves(
           w.timer = 3 + w.rand() * 5;
         } else {
           w.heading = turnTo(w.heading, Math.atan2(dx, dz), dt * 4);
-          const speed = (fleeing ? 2.6 : 0.9) * dt;
-          const nx = w.pos.x + Math.sin(w.heading) * speed;
-          const nz = w.pos.z + Math.cos(w.heading) * speed;
-          if (canWalk(nx, nz)) {
-            w.pos.x = nx;
-            w.pos.z = nz;
+          const st = steer(w, w.pos.x, w.pos.z, w.heading, (fleeing ? 2.6 : 0.9) * o.speed * dt, canWalk);
+          if (st) {
+            w.pos.x = st.x;
+            w.pos.z = st.z;
+            w.heading = turnTo(w.heading, st.heading, 0.5);
           } else {
             w.state = 'idle';
             w.timer = 1;
