@@ -1,7 +1,6 @@
 # Exploradores del bosque
 
-Demo técnica (React + TypeScript + Babylon.js) descrita en `../Demo-Exploradores-del-bosque-hongos.md`.
-Es una muestra de capacidades del equipo; no es un proyecto previo de los CV.
+Proyecto técnico (React + TypeScript + Babylon.js).
 
 ## Ejecutar
 
