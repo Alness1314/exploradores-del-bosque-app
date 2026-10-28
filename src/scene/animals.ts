@@ -3,7 +3,38 @@ import type { AnimationGroup, PBRMaterial } from '@babylonjs/core';
 
 export type Updater = (time: number, dt: number) => void;
 
-function flatMat(scene: Scene, name: string, color: string, emissive = 0.25): StandardMaterial {
+/** Presa registrada en el ecosistema: los depredadores la ven, la persiguen y se la comen. */
+export interface Prey {
+  kind: 'rabbit' | 'hare' | 'bird';
+  /** Posición actual (se actualiza sola). */
+  pos: Vector3;
+  readonly alive: boolean;
+  /** Un depredador ya la persigue. */
+  chased: boolean;
+  /** Un depredador la atrapó: deja de moverse. */
+  caught: () => void;
+  /** Avance de la comida (0 a 1); al llegar a 1 desaparece y reaparece más tarde. */
+  eat: (progress: number) => void;
+  /** Un depredador se acerca desde (x, z). */
+  alarm: (x: number, z: number) => void;
+}
+
+/** Depredador que asusta a las presas mientras caza. */
+export interface Threat {
+  x: number;
+  z: number;
+  range: number;
+  active: boolean;
+}
+
+export interface Ecology {
+  prey: Prey[];
+  threats: Threat[];
+}
+
+export const createEcology = (): Ecology => ({ prey: [], threats: [] });
+
+export function flatMat(scene: Scene, name: string, color: string, emissive = 0.25): StandardMaterial {
   const m = new StandardMaterial(name, scene);
   const c = Color3.FromHexString(color);
   m.diffuseColor = c;
@@ -12,7 +43,7 @@ function flatMat(scene: Scene, name: string, color: string, emissive = 0.25): St
   return m;
 }
 
-function unlit(scene: Scene, name: string, color: string): StandardMaterial {
+export function unlit(scene: Scene, name: string, color: string): StandardMaterial {
   const m = new StandardMaterial(name, scene);
   m.emissiveColor = Color3.FromHexString(color);
   m.disableLighting = true;
@@ -20,7 +51,7 @@ function unlit(scene: Scene, name: string, color: string): StandardMaterial {
   return m;
 }
 
-function rng(seed: number) {
+export function rng(seed: number) {
   let s = seed;
   return () => {
     s = (s * 16807) % 2147483647;
@@ -35,7 +66,7 @@ interface Winged {
 }
 
 /** Cuerpo con dos alas articuladas en el eje longitudinal; el aleteo rota cada articulación sobre Z. */
-function winged(scene: Scene, name: string, wingSize: [number, number], wingMat: StandardMaterial, bodyMat: StandardMaterial, bodyLen: number, bodyR: number): Winged {
+export function winged(scene: Scene, name: string, wingSize: [number, number], wingMat: StandardMaterial, bodyMat: StandardMaterial, bodyLen: number, bodyR: number): Winged {
   const node = new TransformNode(name, scene);
   const body = MeshBuilder.CreateCylinder(`${name}_body`, { height: bodyLen, diameter: bodyR * 2, tessellation: 6 }, scene);
   body.rotation.x = Math.PI / 2;
@@ -96,7 +127,7 @@ export function buildButterflies(scene: Scene, centers: Vector3[], count: number
 }
 
 /** Aves que giran sobre el bosque: unas por encima de las copas y otras más bajas, entre los árboles. */
-export function buildBirds(scene: Scene, count: number): Updater {
+export function buildBirds(scene: Scene, count: number, ecology?: Ecology): Updater {
   const rand = rng(31);
   const wing = unlit(scene, 'birdWing', '#33363d');
   const body = flatMat(scene, 'birdBody', '#2c2f36');
@@ -110,21 +141,59 @@ export function buildBirds(scene: Scene, count: number): Updater {
       speed: (high ? 0.1 : 0.2) + rand() * 0.08,
       dir: rand() > 0.5 ? 1 : -1,
       phase: rand() * 6.28,
+      th: 0,
+      panic: 0,
+      alive: true,
+      respawn: 0,
+      high,
       ox: (rand() - 0.5) * 8,
       oz: (rand() - 0.5) * 8,
       flap: high ? 4 : 11,
     };
   });
-  return (t) => {
+  birds.forEach((b) => {
+    b.th = b.phase;
+    // Las aves bajas son las presas del águila; las altas (cuervos) no.
+    if (b.high || !ecology) return;
+    ecology.prey.push({
+      kind: 'bird',
+      pos: b.node.position,
+      get alive() {
+        return b.alive;
+      },
+      chased: false,
+      caught: () => {
+        b.alive = false;
+        b.node.setEnabled(false);
+        b.respawn = 25 + rand() * 20;
+      },
+      eat: () => {},
+      alarm: () => {
+        b.panic = 3;
+      },
+    });
+  });
+  return (t, dt) => {
     for (const b of birds) {
-      const th = b.phase + b.dir * b.speed * t;
+      if (!b.alive) {
+        b.respawn -= dt;
+        if (b.respawn <= 0) {
+          b.alive = true;
+          b.node.setEnabled(true);
+        }
+        continue;
+      }
+      // Si el águila se acerca, el ave acelera su vuelo.
+      b.panic = Math.max(0, b.panic - dt);
+      b.th += b.dir * b.speed * dt * (b.panic > 0 ? 3.2 : 1);
+      const th = b.th;
       const x = b.ox + Math.cos(th) * b.radius;
       const z = b.oz + Math.sin(th) * b.radius;
       b.node.position.set(x, b.height + Math.sin(t * 0.5 + b.phase) * 0.9, z);
       b.node.rotation.y = Math.atan2(-Math.sin(th) * b.dir, Math.cos(th) * b.dir);
       // Aleteo con pausas de planeo.
       const glide = Math.max(0, Math.sin(t * 0.35 + b.phase));
-      const flap = 0.1 + Math.sin(t * b.flap + b.phase) * 0.65 * (1 - glide * 0.85);
+      const flap = 0.1 + Math.sin(t * b.flap * (b.panic > 0 ? 1.8 : 1) + b.phase) * 0.65 * (1 - glide * (b.panic > 0 ? 0 : 0.85));
       b.left.rotation.z = flap;
       b.right.rotation.z = -flap;
       b.node.rotation.z = Math.sin(th * 3) * 0.12 * b.dir;
@@ -136,7 +205,12 @@ interface Rabbit {
   root: TransformNode;
   body: TransformNode;
   ears: TransformNode[];
-  state: 'idle' | 'hop' | 'flee';
+  state: 'idle' | 'hop' | 'flee' | 'dead';
+  /** 0 vivo, 1 tendido (atrapado), 2 desaparecido hasta reaparecer. */
+  dead: number;
+  deadT: number;
+  home: Vector3;
+  group: number;
   timer: number;
   hopT: number;
   hopDur: number;
@@ -159,6 +233,10 @@ export interface RabbitOptions {
   /** Longitud relativa de cada salto. */
   step: number;
   seed: number;
+  kind: 'rabbit' | 'hare';
+  ecology?: Ecology;
+  /** Madriguera de cada animal: los de la misma se alertan entre sí y pastan juntos. */
+  groups?: number[];
 }
 
 /**
@@ -172,7 +250,7 @@ export function buildRabbits(
   player: () => Vector3,
   options: Partial<RabbitOptions> = {},
 ): Updater {
-  const o: RabbitOptions = { prefix: 'rabbit', scale: 1, ears: 1, fur: '#9b8566', step: 1, seed: 11, ...options };
+  const o: RabbitOptions = { prefix: 'rabbit', scale: 1, ears: 1, fur: '#9b8566', step: 1, seed: 11, kind: 'rabbit', ...options };
   const rand = rng(o.seed);
   const fur = flatMat(scene, `${o.prefix}Fur`, o.fur, 0.3);
   const light = flatMat(scene, `${o.prefix}Light`, '#e9e1d2', 0.4);
@@ -212,6 +290,10 @@ export function buildRabbits(
       body,
       ears,
       state: 'idle' as const,
+      dead: 0,
+      deadT: 0,
+      home: s.clone(),
+      group: o.groups?.[i] ?? i,
       timer: 0.5 + rand() * 2,
       hopT: 0,
       hopDur: 0.45,
@@ -222,6 +304,34 @@ export function buildRabbits(
       hopsLeft: 0,
       seed: rand() * 10,
     };
+  });
+
+  rabbits.forEach((r) => {
+    o.ecology?.prey.push({
+      kind: o.kind,
+      pos: r.root.position,
+      get alive() {
+        return r.state !== 'dead';
+      },
+      chased: false,
+      caught: () => {
+        r.state = 'dead';
+        r.dead = 1;
+        r.root.rotation.z = 1.45; // queda tendido de costado
+        r.body.position.y = 0;
+        r.body.rotation.x = 0;
+      },
+      eat: (k) => {
+        if (r.dead === 2) return;
+        r.root.scaling.setAll(o.scale * (1 - 0.9 * Math.min(1, k)));
+        if (k >= 1) {
+          r.dead = 2;
+          r.root.setEnabled(false);
+          r.deadT = 30 + rand() * 25;
+        }
+      },
+      alarm: () => {},
+    });
   });
 
   const startHop = (r: Rabbit, heading: number, step: number, dur: number) => {
@@ -244,15 +354,57 @@ export function buildRabbits(
 
   return (t, dt) => {
     const p = player();
+    const threats = o.ecology?.threats ?? [];
     for (const r of rabbits) {
-      const dx = r.root.position.x - p.x;
-      const dz = r.root.position.z - p.z;
-      const dist = Math.hypot(dx, dz);
-      if (r.state !== 'flee' && dist < 3.2 * o.scale) {
+      if (r.dead === 2) {
+        r.deadT -= dt;
+        if (r.deadT <= 0) {
+          r.dead = 0;
+          r.state = 'idle';
+          r.timer = 1 + rand() * 2;
+          r.root.position.copyFrom(r.home);
+          r.root.rotation.z = 0;
+          r.root.scaling.setAll(o.scale);
+          r.root.setEnabled(true);
+        }
+        continue;
+      }
+      if (r.dead === 1) continue; // atrapado: lo consume el depredador
+      const px = r.root.position.x - p.x;
+      const pz = r.root.position.z - p.z;
+      const dist = Math.hypot(px, pz);
+      // Amenaza más cercana: el visitante o un depredador cazando.
+      let dx = px;
+      let dz = pz;
+      let hot = dist < 3.2 * o.scale;
+      let hotNear = false;
+      let best = hot ? dist : Infinity;
+      for (const th of threats) {
+        if (!th.active) continue;
+        const tx = r.root.position.x - th.x;
+        const tz = r.root.position.z - th.z;
+        const td = Math.hypot(tx, tz);
+        if (td < th.range + 6) hotNear = true;
+        if (td < th.range && td < best) {
+          best = td;
+          dx = tx;
+          dz = tz;
+          hot = true;
+        }
+      }
+      if (r.state !== 'flee' && hot) {
         r.state = 'flee';
         r.hopsLeft = 99;
         r.hopT = 1; // termina el salto actual y arranca uno nuevo
-      } else if (r.state === 'flee' && dist > 8 * o.scale) {
+        // Los de la misma madriguera huyen juntos.
+        for (const q of rabbits) {
+          if (q !== r && q.group === r.group && q.dead === 0 && q.state !== 'flee' && Math.hypot(q.root.position.x - r.root.position.x, q.root.position.z - r.root.position.z) < 9) {
+            q.state = 'flee';
+            q.hopsLeft = 99;
+            q.hopT = 1;
+          }
+        }
+      } else if (r.state === 'flee' && !hot && !hotNear && dist > 8 * o.scale) {
         r.state = 'idle';
         r.timer = 1 + rand() * 2;
         r.hopT = 1;
@@ -264,7 +416,8 @@ export function buildRabbits(
         r.ears[0].rotation.x = -0.15 + Math.sin(t * 2.1 + r.seed) * 0.08;
         r.ears[1].rotation.x = -0.15 + Math.sin(t * 1.7 + r.seed * 2) * 0.08;
         r.body.position.y = 0;
-        r.body.rotation.x = 0;
+        // Mordisquea el pasto: baja y sube la cabeza.
+        r.body.rotation.x = Math.max(0, Math.sin(t * 2.4 + r.seed)) * 0.45;
         if (r.timer <= 0) {
           r.hopsLeft = 2 + Math.floor(rand() * 3);
           r.heading += (rand() - 0.5) * 2.4;
@@ -599,7 +752,7 @@ const sides = new WeakMap<object, number>();
  * Da un paso hacia `heading`; si hay un árbol o tronco delante, lo rodea probando rumbos cada vez más desviados hacia su lado
  * preferido. Devuelve `null` solo si no hay salida (rodeado).
  */
-function steer(key: object, x: number, z: number, heading: number, dist: number, canWalk: (x: number, z: number) => boolean) {
+export function steer(key: object, x: number, z: number, heading: number, dist: number, canWalk: (x: number, z: number) => boolean) {
   let side = sides.get(key);
   if (!side) {
     side = Math.random() < 0.5 ? -1 : 1;
@@ -616,7 +769,7 @@ function steer(key: object, x: number, z: number, heading: number, dist: number,
   return null;
 }
 
-function turnTo(current: number, want: number, rate: number): number {
+export function turnTo(current: number, want: number, rate: number): number {
   const diff = Math.atan2(Math.sin(want - current), Math.cos(want - current));
   return current + diff * Math.min(1, rate);
 }
@@ -639,6 +792,19 @@ export interface PackOptions {
   /** Multiplicador de velocidad. */
   speed: number;
   seed: number;
+  /** Radio (m) alrededor de su zona en el que merodea. */
+  roam: number;
+  /** Si se indica, el animal caza presas del ecosistema. */
+  hunt?: {
+    ecology: Ecology;
+    kinds: Prey['kind'][];
+    /** Velocidad de carrera (m/s). */
+    speed: number;
+    /** Distancia a la que detecta una presa (m). */
+    sight: number;
+    /** Segundos que tarda en comérsela. */
+    eatTime: number;
+  };
 }
 
 export async function buildWolves(
@@ -651,7 +817,7 @@ export async function buildWolves(
   onMeshes?: (meshes: Mesh[]) => void,
   options: Partial<PackOptions> = {},
 ): Promise<Updater> {
-  const o: PackOptions = { prefix: 'wolf', length: 1.5, tint: undefined, speed: 1, seed: 404, ...options };
+  const o: PackOptions = { prefix: 'wolf', length: 1.5, tint: undefined, speed: 1, seed: 404, roam: 8, ...options };
   const container = await LoadAssetContainerAsync(url, scene);
 
   interface Wolf {
@@ -662,8 +828,13 @@ export async function buildWolves(
     pos: Vector3;
     home: Vector3;
     heading: number;
-    state: 'idle' | 'walk' | 'avoid';
+    state: 'idle' | 'walk' | 'avoid' | 'hunt' | 'eat';
     timer: number;
+    prey?: Prey;
+    cool: number;
+    huntT: number;
+    eatT: number;
+    threat?: Threat;
     target: Vector3;
     foot: number;
     rand: () => number;
@@ -721,7 +892,14 @@ export async function buildWolves(
       target: home.clone(),
       foot: -b.min.y,
       rand: r,
+      cool: 10 + r() * 35,
+      huntT: 0,
+      eatT: 0,
     };
+    if (o.hunt) {
+      w.threat = { x: home.x, z: home.z, range: 11, active: false };
+      o.hunt.ecology.threats.push(w.threat);
+    }
     return w;
   });
 
@@ -750,7 +928,7 @@ export async function buildWolves(
         z = w.pos.z + Math.cos(a) * (6 + w.rand() * 5);
       } else {
         const a = w.rand() * 6.28;
-        const d = 2 + w.rand() * 8;
+        const d = 2 + w.rand() * o.roam;
         x = w.home.x + Math.cos(a) * d;
         z = w.home.z + Math.sin(a) * d;
       }
@@ -764,9 +942,52 @@ export async function buildWolves(
 
   return (_t, dt) => {
     const p = player();
+    const H = o.hunt;
+    /** Termina la cacería (o la comida): suelta a la presa y descansa un rato. */
+    const endHunt = (w: Wolf, cool: number) => {
+      if (w.prey) {
+        if (w.state === 'eat') w.prey.eat(1);
+        w.prey.chased = false;
+        w.prey = undefined;
+      }
+      if (w.threat) w.threat.active = false;
+      w.state = 'idle';
+      w.timer = 2 + w.rand() * 3;
+      w.cool = cool;
+    };
     for (const w of wolves) {
       const dPlayer = Math.hypot(w.pos.x - p.x, w.pos.z - p.z);
-      if (w.state !== 'avoid' && dPlayer < 9 && pickTarget(w, { x: p.x, z: p.z })) w.state = 'avoid';
+      if (H && w.threat) {
+        w.threat.x = w.pos.x;
+        w.threat.z = w.pos.z;
+        w.cool -= dt;
+        // Con el visitante muy cerca abandona la caza.
+        if ((w.state === 'hunt' || w.state === 'eat') && dPlayer < 5) endHunt(w, 20);
+        if ((w.state === 'idle' || w.state === 'walk') && w.cool <= 0 && dPlayer > 12) {
+          let pick: Prey | undefined;
+          let bestScore = Infinity;
+          for (const pr of H.ecology.prey) {
+            if (!pr.alive || pr.chased || !H.kinds.includes(pr.kind)) continue;
+            const d = Math.hypot(pr.pos.x - w.pos.x, pr.pos.z - w.pos.z);
+            // Prefiere los conejos: las liebres son demasiado rápidas.
+            const score = d * (pr.kind === 'hare' ? 2.2 : 1);
+            if (d < H.sight && score < bestScore) {
+              bestScore = score;
+              pick = pr;
+            }
+          }
+          if (pick) {
+            w.prey = pick;
+            pick.chased = true;
+            w.state = 'hunt';
+            w.huntT = 0;
+            w.threat.active = true;
+          } else {
+            w.cool = 3 + w.rand() * 4;
+          }
+        }
+      }
+      if (w.state !== 'avoid' && w.state !== 'hunt' && w.state !== 'eat' && dPlayer < 9 && pickTarget(w, { x: p.x, z: p.z })) w.state = 'avoid';
 
       if (w.state === 'idle') {
         play(w, w.idle);
@@ -775,6 +996,37 @@ export async function buildWolves(
           if (pickTarget(w)) w.state = 'walk';
           else w.timer = 1;
         }
+      } else if (w.state === 'hunt' && w.prey && H) {
+        // Persecución: corre hacia la presa y, si la alcanza, se detiene a comérsela.
+        const pr = w.prey;
+        play(w, w.walk, 2.2);
+        w.huntT += dt;
+        const dx = pr.pos.x - w.pos.x;
+        const dz = pr.pos.z - w.pos.z;
+        const d = Math.hypot(dx, dz);
+        if (!pr.alive) endHunt(w, 8);
+        else if (d < 0.9) {
+          pr.caught();
+          w.state = 'eat';
+          w.eatT = 0;
+          if (w.threat) w.threat.active = false; // los demás conejos se calman
+        } else if (w.huntT > 9) endHunt(w, 25); // se cansa: la presa escapó
+        else {
+          pr.alarm(w.pos.x, w.pos.z);
+          w.heading = turnTo(w.heading, Math.atan2(dx, dz), dt * 7);
+          const st = steer(w, w.pos.x, w.pos.z, w.heading, H.speed * dt, canWalk);
+          if (st) {
+            w.pos.x = st.x;
+            w.pos.z = st.z;
+            w.heading = turnTo(w.heading, st.heading, 0.5);
+          } else endHunt(w, 6);
+        }
+      } else if (w.state === 'eat' && w.prey && H) {
+        play(w, w.idle, 0.8);
+        w.eatT += dt;
+        w.heading = turnTo(w.heading, Math.atan2(w.prey.pos.x - w.pos.x, w.prey.pos.z - w.pos.z), dt * 3);
+        w.prey.eat(Math.min(1, w.eatT / H.eatTime));
+        if (w.eatT >= H.eatTime) endHunt(w, 70 + w.rand() * 50);
       } else {
         const fleeing = w.state === 'avoid';
         play(w, w.walk, (fleeing ? 1.7 : 1) * o.speed);

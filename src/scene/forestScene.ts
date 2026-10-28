@@ -33,7 +33,9 @@ import '@babylonjs/loaders/glTF/2.0';
 import { SPECIES_ORDER, type SpeciesId } from '../data/species';
 import { buildGrass, type Grass } from './grass';
 import { buildShape, type ShapeKind, type ShapePalette } from './shapes';
-import { buildBirds, buildButterflies, buildDeer, buildRabbits, buildWolves, type Updater } from './animals';
+import { buildBirds, buildButterflies, buildDeer, buildRabbits, buildWolves, createEcology, type Updater } from './animals';
+import { buildLake, inLake } from './lake';
+import { buildDucks, buildEagle, buildTurtles } from './wildlife';
 import { VrHud, VrPanel, isVrSupported, type VrAction, type VrCard } from './vr';
 
 export type { VrCard } from './vr';
@@ -465,6 +467,7 @@ async function buildForest({ scene, root, casters, colliders }: Builders): Promi
     const scale = 0.85 + rand() * 0.55;
     const rot = rand() * 6;
     if (keepClear.some((k) => Math.hypot(k.x - x, k.z - z) < 4.6)) continue;
+    if (inLake(x, z, 2.5)) continue;
     // Despeja la línea de visión entre cada punto de observación y su hongo.
     if (POINTS.some((p) => distToSegment(x, z, p.position, p.look) < 2.4)) continue;
     // Despeja el costado visible del tronco caído.
@@ -556,6 +559,7 @@ function buildDeadwood({ scene, root, casters, colliders }: Builders, existing: 
   const keepClear = [...POINTS.map((p) => p.position), ...Object.values(MAIN), BIG_TREE, ...SNAGS];
   const free = (x: number, z: number, r: number) =>
     !keepClear.some((k) => Math.hypot(k.x - x, k.z - z) < 4.6) &&
+    !inLake(x, z, 3) &&
     !POINTS.some((p) => distToSegment(x, z, p.position, p.look) < 2.4) &&
     !(x > -3 && x < 11 && z > -1 && z < 8) &&
     !existing.some((c) => Math.hypot(c.x - x, c.z - z) < c.r + r + 0.8);
@@ -1060,6 +1064,8 @@ export function createForestScene(canvas: HTMLCanvasElement, cb: ForestCallbacks
   const casters: Mesh[] = [];
   const colliders: Circle[] = [];
   const b: Builders = { scene, root, casters, colliders };
+  const lake = buildLake(scene, root, (m) => casters.push(m as Mesh));
+  colliders.push(...lake.colliders);
   const forestReady = buildForest(b);
   buildDecor(b);
 
@@ -1273,7 +1279,7 @@ export function createForestScene(canvas: HTMLCanvasElement, cb: ForestCallbacks
 
   const treeRand = rng(2024);
   const walkable = (x: number, z: number, margin = 0.3) =>
-    Math.hypot(x, z) < WORLD_RADIUS - 2 && !colliders.some((c) => Math.hypot(c.x - x, c.z - z) < c.r + margin);
+    Math.hypot(x, z) < WORLD_RADIUS - 2 && !inLake(x, z, 0.8) && !colliders.some((c) => Math.hypot(c.x - x, c.z - z) < c.r + margin);
   // Posiciones ya ocupadas por hongos: ninguno nuevo se coloca a menos de 3.5 m de otro.
   const taken: Vector3[] = Object.values(MAIN).map((v) => v.clone());
   const spot = (minR: number, maxR: number, cx = 0, cz = 0): Vector3 | null => {
@@ -1283,6 +1289,7 @@ export function createForestScene(canvas: HTMLCanvasElement, cb: ForestCallbacks
       const x = cx + Math.cos(a) * d;
       const z = cz + Math.sin(a) * d;
       if (!walkable(x, z, 0.7)) continue;
+      if (inLake(x, z, 3)) continue;
       if (POINTS.some((p) => Math.hypot(p.position.x - x, p.position.z - z) < 2.5)) continue;
       if (taken.some((m) => Math.hypot(m.x - x, m.z - z) < 3.5)) continue;
       const found = new Vector3(x, 0, z);
@@ -1552,29 +1559,53 @@ export function createForestScene(canvas: HTMLCanvasElement, cb: ForestCallbacks
   // --- Pasto con viento y animales ----------------------------------------
   const updaters: Updater[] = [];
   let grass: Grass | null = null;
+  const eco = createEcology();
   const onLog = (x: number, z: number) => x > -0.5 && x < 8.5 && Math.abs(z - 2) < 1.0;
   void forestReady.then(() => {
     const player = () => (scene.activeCamera ?? camera).globalPosition;
     // El pasto se repite en una cuadrícula de 80 m centrada en el visitante, así que cubre todo el mundo.
-    grass = buildGrass(scene, LOW_POWER ? 7000 : 18000, 80, colliders, onLog);
+    grass = buildGrass(scene, LOW_POWER ? 7000 : 18000, 80, colliders, (x, z) => onLog(x, z) || inLake(x, z, 2.2));
     const centers = [[-6, 3], [-1, 4], [3, 6], [1, -4], [9, -1], [-9, -4], [-30, 20], [28, 24], [-24, -30], [34, -6], [10, 36], [-38, 0]].map(([x, z]) => new Vector3(x, 0, z));
     updaters.push(buildButterflies(scene, centers, LOW_POWER ? 12 : 22));
-    updaters.push(buildBirds(scene, LOW_POWER ? 5 : 9));
+    // Ecosistema: las presas (conejos, liebres y aves pequeñas) y sus depredadores se ven entre sí.
+    updaters.push(buildBirds(scene, LOW_POWER ? 6 : 12, eco));
+    updaters.push(lake.update);
 
     const canHop = (x: number, z: number) => walkable(x, z, 0.35) && !onLog(x, z);
     const pick = (n: number, minR: number, maxR: number) =>
       Array.from({ length: n }, () => spot(minR, maxR)).filter((v): v is Vector3 => !!v);
-    // Conejos cerca del claro y liebres (más grandes, de orejas largas y saltos amplios) más lejos.
-    const near = [spot(3, 9, -4, 5), spot(3, 9, 3, 6), spot(4, 10, 8, -3)].filter((v): v is Vector3 => !!v);
-    updaters.push(buildRabbits(scene, near, canHop, player));
-    updaters.push(buildRabbits(scene, pick(5, 14, WORLD_RADIUS - 8), canHop, player, { prefix: 'hare', scale: 1.4, ears: 1.7, fur: '#a58c62', step: 1.6, seed: 23 }));
 
-    // Dos manadas de venados, lejos del claro inicial.
+    // Conejos en madrigueras: cada grupo pasta junto, mordisqueando el pasto, y huye junto. Dos de ellas están cerca de los depredadores.
+    const warrens: [number, number, number][] = [[-5, 6, 3], [-24, -12, 4], [17, 22, 4], [14, -16, 3], [-8, 30, 3]];
+    const rabbitStarts: Vector3[] = [];
+    const rabbitGroups: number[] = [];
+    warrens.forEach(([cx, cz, n], g) => {
+      for (let i = 0, tries = 0; i < n && tries < 80; tries++) {
+        const ang = treeRand() * Math.PI * 2;
+        const r = 0.6 + treeRand() * 2.6;
+        const x = cx + Math.cos(ang) * r;
+        const z = cz + Math.sin(ang) * r;
+        if (!canHop(x, z)) continue;
+        rabbitStarts.push(new Vector3(x, 0, z));
+        rabbitGroups.push(g);
+        i++;
+      }
+    });
+    updaters.push(buildRabbits(scene, rabbitStarts, canHop, player, { ecology: eco, groups: rabbitGroups }));
+    // Liebres (más grandes, de orejas largas y saltos amplios): demasiado rápidas para la mayoría de los depredadores.
+    const hareStarts = pick(5, 14, WORLD_RADIUS - 8);
+    updaters.push(
+      buildRabbits(scene, hareStarts, canHop, player, {
+        prefix: 'hare', scale: 1.4, ears: 1.7, fur: '#a58c62', step: 1.6, seed: 23, kind: 'hare', ecology: eco, groups: hareStarts.map((_, i) => 100 + (i >> 1)),
+      }),
+    );
+
+    // Dos manadas de venados, lejos del claro inicial: pastan juntos alrededor del centro de su zona.
     const home = (x: number, z: number) => spot(1, 5, x, z) ?? new Vector3(x, 0, z);
     updaters.push(buildDeer(scene, home(30, -22), LOW_POWER ? 3 : 4, (x, z) => walkable(x, z, 0.5), player));
     updaters.push(buildDeer(scene, home(-22, 36), 3, (x, z) => walkable(x, z, 0.5), player));
 
-    // Manada de lobos (modelo animado CC0): se aparta del visitante si este se acerca.
+    // Manada de lobos (modelo animado CC0): merodea cerca del lago, caza conejos y se aparta del visitante.
     const packCenter = home(-34, -24);
     const wolfHomes = [packCenter, home(packCenter.x + 4, packCenter.z + 3), home(packCenter.x - 3, packCenter.z + 5)];
     buildWolves(
@@ -1585,12 +1616,13 @@ export function createForestScene(canvas: HTMLCanvasElement, cb: ForestCallbacks
       (x, z) => walkable(x, z, 0.5),
       player,
       (meshes) => meshes.forEach((m) => shadows.addShadowCaster(m)),
+      { roam: 24, hunt: { ecology: eco, kinds: ['rabbit', 'hare'], speed: 4.6, sight: 24, eatTime: 8 } },
     )
       .then((u) => updaters.push(u))
       .catch((e) => console.warn('Los lobos no cargaron.', e));
 
-    // Zorros: mismo modelo animado, más pequeño, de pelaje rojizo y más ágil; viven en otra zona del bosque.
-    const foxHome = home(26, 30);
+    // Zorros: mismo modelo animado, más pequeño, de pelaje rojizo y más ágil; cazan conejos.
+    const foxHome = home(16, 17);
     const foxHomes = [foxHome, home(foxHome.x + 3, foxHome.z - 4), home(foxHome.x - 5, foxHome.z + 2)];
     buildWolves(
       scene,
@@ -1600,10 +1632,15 @@ export function createForestScene(canvas: HTMLCanvasElement, cb: ForestCallbacks
       (x, z) => walkable(x, z, 0.5),
       player,
       (meshes) => meshes.forEach((m) => shadows.addShadowCaster(m)),
-      { prefix: 'fox', length: 0.85, tint: '#d9772b', speed: 1.35, seed: 733 },
+      { prefix: 'fox', length: 0.85, tint: '#d9772b', speed: 1.35, seed: 733, roam: 20, hunt: { ecology: eco, kinds: ['rabbit', 'hare'], speed: 5.2, sight: 22, eatTime: 5 } },
     )
       .then((u) => updaters.push(u))
       .catch((e) => console.warn('Los zorros no cargaron.', e));
+
+    // Águila que caza aves pequeñas, y patos y tortugas en el lago.
+    updaters.push(buildEagle(scene, eco, (x, z) => walkable(x, z, 1.5), player));
+    updaters.push(buildDucks(scene, LOW_POWER ? 4 : 6, player));
+    updaters.push(buildTurtles(scene, LOW_POWER ? 3 : 4, lake.perches, player));
   });
 
   // --- Marcado de hallazgos ------------------------------------------------
@@ -1791,7 +1828,7 @@ export function createForestScene(canvas: HTMLCanvasElement, cb: ForestCallbacks
     grass?.update(time, cam.globalPosition);
   });
 
-  if (import.meta.env.DEV) (window as unknown as { __forest: unknown }).__forest = { camera, scene, instances, colliders, panel, hud };
+  if (import.meta.env.DEV) (window as unknown as { __forest: unknown }).__forest = { camera, scene, instances, colliders, panel, hud, eco };
 
   // Avisa que todo está listo cuando hay un primer cuadro y los modelos terminaron (o fallaron).
   let rendered = false;
